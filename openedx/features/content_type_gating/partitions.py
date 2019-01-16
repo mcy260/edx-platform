@@ -9,13 +9,19 @@ import logging
 
 import crum
 from django.apps import apps
+from django.conf import settings
 from django.template.loader import render_to_string
 from django.utils.translation import ugettext_lazy as _
 from web_fragments.fragment import Fragment
 
 from course_modes.models import CourseMode
+from courseware.masquerade import (
+    is_masquerading_as_specific_student,
+    is_masquerading_as_student,
+    get_course_masquerade,
+)
 from lms.djangoapps.commerce.utils import EcommerceService
-from xmodule.partitions.partitions import UserPartition, UserPartitionError
+from xmodule.partitions.partitions import UserPartition, UserPartitionError, ENROLLMENT_TRACK_PARTITION_ID
 from openedx.core.lib.mobile_utils import is_request_from_mobile_app
 from openedx.features.content_type_gating.models import ContentTypeGatingConfig
 from openedx.features.content_type_gating.helpers import CONTENT_GATING_PARTITION_ID, FULL_ACCESS, LIMITED_ACCESS
@@ -73,9 +79,10 @@ class ContentTypeGatingPartition(UserPartition):
     to gated content.
     """
     def access_denied_fragment(self, block, user, user_group, allowed_groups):
-        modes = CourseMode.modes_for_course_dict(block.scope_ids.usage_id.course_key)
+        course_key = self._get_course_key_from_course_block(block)
+        modes = CourseMode.modes_for_course_dict(course_key)
         verified_mode = modes.get(CourseMode.VERIFIED)
-        if verified_mode is None or not self._is_audit_enrollment(user, block):
+        if verified_mode is None or not self._is_audit_enrollment(user, course_key):
             return None
         ecommerce_checkout_link = self._get_checkout_link(user, verified_mode.sku)
 
@@ -87,14 +94,48 @@ class ContentTypeGatingPartition(UserPartition):
         }))
         return frag
 
-    def access_denied_message(self, block, user, user_group, allowed_groups):
-        if self._is_audit_enrollment(user, block):
+    def access_denied_message(self, course_key, user, user_group, allowed_groups):
+        if self._is_audit_enrollment(user, course_key):
             return _(u"Graded assessments are available to Verified Track learners. Upgrade to Unlock.")
         return None
 
-    def _is_audit_enrollment(self, user, block):
+    def _is_audit_enrollment(self, user, course_key):
+        """
+        Returns True if:
+            1 - Viewing course as `Learner in Audit`
+            2 - Viewing course as `Specific student` and student has active audit enrollment
+        """
+        if self._is_masquerading_as_generic_student(user, course_key):
+            return self._is_masquerading_audit_enrollment(user, course_key)
+        
+        return self._has_active_enrollment_in_audit_mode(user, course_key)
+
+    def _is_masquerading_as_generic_student(self, user, course_key):
+        """
+        Returns True if viewing course as `Learner in {enrollment/group etc.}`
+        """
+        return (
+            is_masquerading_as_student(user, course_key) and
+            not is_masquerading_as_specific_student(user, course_key)
+        )
+
+    def _is_masquerading_audit_enrollment(self, user, course_key):
+        """
+        Returns True if viewing course as `Learner in Audit`
+        """
+        course_masquerade = get_course_masquerade(user, course_key)
+        audit_mode_id = settings.COURSE_ENROLLMENT_MODES.get(CourseMode.AUDIT, {}).get('id')
+        if course_masquerade.user_partition_id == ENROLLMENT_TRACK_PARTITION_ID:
+            return course_masquerade.group_id == audit_mode_id
+        return False
+
+    def _has_active_enrollment_in_audit_mode(self, user, course_key):
+        """
+        Returns True if user has active audit enrollment in course
+        """
         course_enrollment = apps.get_model('student.CourseEnrollment')
-        mode_slug, is_active = course_enrollment.enrollment_mode_for_user(user, block.scope_ids.usage_id.course_key)
+        mode_slug, is_active = course_enrollment.enrollment_mode_for_user(user, course_key)
+        
         return mode_slug == CourseMode.AUDIT and is_active
 
     def _get_checkout_link(self, user, sku):
@@ -102,6 +143,12 @@ class ContentTypeGatingPartition(UserPartition):
         ecommerce_checkout = ecomm_service.is_enabled(user)
         if ecommerce_checkout and sku:
             return ecomm_service.get_checkout_page_url(sku) or ''
+
+    def _get_course_key_from_course_block(self, block):
+        """
+        Extracts and returns `course_key` from `block`
+        """
+        return block.scope_ids.usage_id.course_key
 
 
 class ContentTypeGatingPartitionScheme(object):

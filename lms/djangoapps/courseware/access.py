@@ -504,6 +504,7 @@ def _has_group_access(descriptor, user, course_key):
     # not that group is added to their list of missing_groups.
     # If missing_groups is empty, the user is granted access.
     # If missing_groups is NOT empty, we generate an error based on one of the particular groups they are missing.
+    # import pdb; pdb.set_trace()
     missing_groups = []
     for partition, groups in partition_groups:
         user_group = partition.scheme.get_group_for_user(
@@ -520,7 +521,7 @@ def _has_group_access(descriptor, user, course_key):
             partition=partition,
             user_group=user_group,
             allowed_groups=allowed_groups,
-            user_message=partition.access_denied_message(descriptor, user, user_group, allowed_groups),
+            user_message=partition.access_denied_message(course_key, user, user_group, allowed_groups),
             user_fragment=partition.access_denied_fragment(descriptor, user, user_group, allowed_groups),
         )
 
